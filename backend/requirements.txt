@@ -33,3 +33,6 @@ tqdm==4.67.3
 treetable==0.2.6
 typing_extensions==4.15.0
 Werkzeug==3.1.8
+fastapi==0.115.0
+uvicorn[standard]==0.32.0
+python-multipart==0.0.12
