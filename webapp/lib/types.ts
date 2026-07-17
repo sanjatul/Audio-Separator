@@ -30,3 +30,14 @@ export interface SSEPayload {
   vocals_url?: string;
   instrumental_url?: string;
 }
+
+export interface TaskRecord {
+  task_id: string;
+  status: string;
+  source_type: string;
+  source_url: string | null;
+  created_at: string | null;
+  completed_at: string | null;
+  vocals_available: boolean;
+  instrumental_available: boolean;
+}
