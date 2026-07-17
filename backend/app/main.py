@@ -5,6 +5,7 @@ if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 import logging
+from sqlalchemy import text
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from . import models
@@ -16,6 +17,25 @@ logging.basicConfig(
     format="%(levelname)s:     %(name)s - %(message)s",
 )
 
+
+def _migrate_db():
+    """Lightweight migration: add missing columns to existing tables."""
+    with engine.connect() as conn:
+        result = conn.execute(text("PRAGMA table_info(users)"))
+        columns = {row[1] for row in result}
+
+        migrations = {
+            "name": "ALTER TABLE users ADD COLUMN name TEXT NOT NULL DEFAULT ''",
+            "created_at": "ALTER TABLE users ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+        }
+        for col, sql in migrations.items():
+            if col not in columns:
+                conn.execute(text(sql))
+                conn.commit()
+                logging.info(f"Migration: added users.{col} column")
+
+
+_migrate_db()
 models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI(
