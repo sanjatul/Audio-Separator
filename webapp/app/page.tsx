@@ -1,267 +1,871 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { checkHealth, extractVocals, getDownloadUrl, ExtractResponse } from "./api/route";
+import { useState, useRef, useEffect } from "react";
+import {
+  UploadCloud,
+  Link as LinkIcon,
+  Music,
+  Loader2,
+  XCircle,
+  CheckCircle2,
+  Download,
+  ArrowRight,
+  Waves,
+  Sparkles,
+  Radio,
+  Disc3,
+} from "lucide-react";
 
-type Status =
-  | { type: "idle" }
-  | { type: "loading" }
-  | { type: "success"; data: ExtractResponse }
-  | { type: "error"; message: string };
+const API_BASE = "http://localhost:8000";
 
-type Health = {
-  demucs: boolean;
-  ffmpeg: boolean;
-  checked: boolean;
-};
+type AppStatus = "idle" | "processing" | "success" | "error";
+
+const PIPELINE_STEPS = [
+  { key: "pending", label: "Queued", icon: Radio },
+  { key: "downloading", label: "Downloading", icon: Download },
+  { key: "converting", label: "Converting Audio", icon: Disc3 },
+  { key: "separating", label: "AI Stem Separation", icon: Waves },
+  { key: "enhancing", label: "AI Enhancement", icon: Sparkles },
+  { key: "completed", label: "Complete", icon: CheckCircle2 },
+];
 
 export default function Home() {
+  const [dragActive, setDragActive] = useState(false);
+  const [url, setUrl] = useState("");
   const [file, setFile] = useState<File | null>(null);
-  const [dragging, setDragging] = useState(false);
-  const [status, setStatus] = useState<Status>({ type: "idle" });
-  const [health, setHealth] = useState<Health>({ demucs: false, ffmpeg: false, checked: false });
-  const inputRef = useRef<HTMLInputElement>(null);
 
+  const [status, setStatus] = useState<AppStatus>("idle");
+  const [pipelineStep, setPipelineStep] = useState("pending");
+  const [downloads, setDownloads] = useState<{
+    vocals: string;
+    instrumental: string;
+  } | null>(null);
+  const [errorMsg, setErrorMsg] = useState("");
+
+  const eventSourceRef = useRef<EventSource | null>(null);
+
+  // Cleanup SSE on unmount
   useEffect(() => {
-    checkHealth()
-      .then((h) => setHealth({ demucs: h.demucs_available, ffmpeg: h.ffmpeg_available, checked: true }))
-      .catch(() => setHealth({ demucs: false, ffmpeg: false, checked: true }));
+    return () => {
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close();
+      }
+    };
   }, []);
 
-  function formatBytes(bytes: number) {
-    if (bytes < 1024) return bytes + " B";
-    if (bytes < 1048576) return (bytes / 1024).toFixed(1) + " KB";
-    return (bytes / 1048576).toFixed(1) + " MB";
-  }
-
-  function handleFileChange(f: File) {
-    setFile(f);
-    setStatus({ type: "idle" });
-  }
-
-  async function handleExtract() {
-    if (!file) return;
-    setStatus({ type: "loading" });
-    try {
-      const data = await extractVocals(file);
-      setStatus({ type: "success", data });
-    } catch (e: unknown) {
-      setStatus({ type: "error", message: e instanceof Error ? e.message : "Unknown error" });
+  const handleDrag = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.type === "dragenter" || e.type === "dragover") {
+      setDragActive(true);
+    } else if (e.type === "dragleave") {
+      setDragActive(false);
     }
-  }
+  };
 
-  const healthOk = health.demucs && health.ffmpeg;
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragActive(false);
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+      setFile(e.dataTransfer.files[0]);
+    }
+  };
+
+  const connectSSE = (taskId: string) => {
+    const es = new EventSource(`${API_BASE}/api/tasks/${taskId}/stream`);
+    eventSourceRef.current = es;
+
+    es.onmessage = (event) => {
+      try {
+        const payload = JSON.parse(event.data);
+        const s = payload.status;
+
+        setPipelineStep(s);
+
+        if (s === "completed") {
+          setStatus("success");
+          setDownloads({
+            vocals: `${API_BASE}${payload.vocals_url}`,
+            instrumental: `${API_BASE}${payload.instrumental_url}`,
+          });
+          es.close();
+        } else if (s === "failed") {
+          setStatus("error");
+          setErrorMsg("The audio pipeline failed. Please try again.");
+          es.close();
+        } else if (s === "cancelled") {
+          setStatus("idle");
+          es.close();
+        } else if (s === "not_found") {
+          setStatus("error");
+          setErrorMsg("Task not found.");
+          es.close();
+        }
+      } catch {
+        // ignore parse errors
+      }
+    };
+
+    es.onerror = () => {
+      es.close();
+      // Only set error if we're still processing
+      setStatus((prev) => (prev === "processing" ? "error" : prev));
+      setErrorMsg("Lost connection to the server.");
+    };
+  };
+
+  const startProcessing = async (type: "file" | "url") => {
+    setStatus("processing");
+    setPipelineStep("pending");
+    setErrorMsg("");
+    try {
+      let res;
+      if (type === "url") {
+        res = await fetch(
+          `${API_BASE}/api/process/youtube?url=${encodeURIComponent(url)}`,
+          { method: "POST" }
+        );
+      } else if (file) {
+        const formData = new FormData();
+        formData.append("file", file);
+        res = await fetch(`${API_BASE}/api/process/upload`, {
+          method: "POST",
+          body: formData,
+        });
+      }
+
+      if (!res || !res.ok) throw new Error("Network error");
+      const data = await res.json();
+
+      if (data.status === "success" && data.task_id) {
+        connectSSE(data.task_id);
+      } else {
+        setStatus("error");
+        setErrorMsg("Server returned an unexpected response.");
+      }
+    } catch (err) {
+      console.error(err);
+      setStatus("error");
+      setErrorMsg("Could not reach the server. Is the backend running?");
+    }
+  };
+
+  const handleCancel = () => {
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close();
+      eventSourceRef.current = null;
+    }
+    setStatus("idle");
+    setPipelineStep("pending");
+  };
+
+  const handleReset = () => {
+    setStatus("idle");
+    setFile(null);
+    setUrl("");
+    setDownloads(null);
+    setPipelineStep("pending");
+    setErrorMsg("");
+  };
+
+  // Determine which steps to show (skip "downloading" for file uploads)
+  const visibleSteps =
+    file && !url
+      ? PIPELINE_STEPS.filter((s) => s.key !== "downloading")
+      : PIPELINE_STEPS;
+
+  const currentStepIndex = visibleSteps.findIndex(
+    (s) => s.key === pipelineStep
+  );
 
   return (
-    <>
-      <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;600;800&display=swap');
-
-        :root {
-          --bg: #080b12;
-          --surface: #0f1420;
-          --surface2: #161d2e;
-          --border: #1e2a42;
-          --accent: #00e5ff;
-          --accent2: #7c3aed;
-          --accent3: #f0abfc;
-          --text: #e2e8f0;
-          --muted: #64748b;
-          --success: #22d3ee;
-          --error: #f87171;
-        }
-
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-
-        body {
-          background: var(--bg);
-          color: var(--text);
-          font-family: 'Syne', sans-serif;
-          min-height: 100vh;
-        }
-
-        .page-bg::before {
-          content: '';
-          position: fixed;
-          inset: 0;
+    <div
+      style={{
+        minHeight: "100vh",
+        background:
+          "radial-gradient(ellipse 80% 60% at 50% -20%, rgba(99,102,241,0.15), transparent), #080b12",
+        color: "#e4e4e7",
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: "24px",
+        position: "relative",
+        overflow: "hidden",
+      }}
+    >
+      {/* Ambient glow */}
+      <div
+        style={{
+          position: "absolute",
+          top: "-180px",
+          left: "50%",
+          transform: "translateX(-50%)",
+          width: "600px",
+          height: "400px",
           background:
-            radial-gradient(ellipse 80% 50% at 20% 20%, rgba(0,229,255,0.07) 0%, transparent 60%),
-            radial-gradient(ellipse 60% 40% at 80% 80%, rgba(124,58,237,0.08) 0%, transparent 60%),
-            radial-gradient(ellipse 40% 60% at 50% 50%, rgba(240,171,252,0.03) 0%, transparent 70%);
-          pointer-events: none;
-          z-index: 0;
-        }
-        .page-bg::after {
-          content: '';
-          position: fixed;
-          inset: 0;
-          background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.15) 2px, rgba(0,0,0,0.15) 4px);
-          pointer-events: none;
-          z-index: 0;
-          opacity: 0.4;
-        }
+            "radial-gradient(circle, rgba(99,102,241,0.12) 0%, transparent 70%)",
+          pointerEvents: "none",
+          zIndex: 0,
+        }}
+      />
 
-        @keyframes wave {
-          0%,100% { transform: scaleY(1); opacity: .5; }
-          50% { transform: scaleY(1.5); opacity: 1; }
+      <div
+        style={{
+          maxWidth: "560px",
+          width: "100%",
+          position: "relative",
+          zIndex: 1,
+        }}
+      >
+        {/* Header */}
+        <div style={{ textAlign: "center", marginBottom: "32px" }}>
+          <div
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              padding: "14px",
+              background: "rgba(39,39,42,0.5)",
+              borderRadius: "16px",
+              marginBottom: "16px",
+              border: "1px solid rgba(255,255,255,0.08)",
+              boxShadow: "0 0 30px rgba(99,102,241,0.15)",
+            }}
+          >
+            <Music style={{ width: 32, height: 32, color: "#818cf8" }} />
+          </div>
+          <h1
+            style={{
+              fontSize: "42px",
+              fontWeight: 800,
+              letterSpacing: "-0.03em",
+              background: "linear-gradient(135deg, #fff 0%, #a1a1aa 100%)",
+              WebkitBackgroundClip: "text",
+              WebkitTextFillColor: "transparent",
+              margin: "0 0 8px 0",
+              lineHeight: 1.1,
+            }}
+          >
+            SonicSplit
+          </h1>
+          <p
+            style={{
+              color: "#71717a",
+              fontSize: "14px",
+              margin: 0,
+              letterSpacing: "0.01em",
+            }}
+          >
+            Professional AI stem separation — drop a file or paste a YouTube
+            link
+          </p>
+        </div>
+
+        {/* Main Card */}
+        <div
+          style={{
+            background: "rgba(24,24,27,0.6)",
+            backdropFilter: "blur(24px)",
+            WebkitBackdropFilter: "blur(24px)",
+            border: "1px solid rgba(255,255,255,0.07)",
+            borderRadius: "24px",
+            padding: "32px",
+            boxShadow:
+              "0 25px 50px -12px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.05)",
+            position: "relative",
+            overflow: "hidden",
+          }}
+        >
+          {/* ========== IDLE STATE ========== */}
+          {status === "idle" && (
+            <div>
+              {/* Drop zone */}
+              <div
+                onDragEnter={handleDrag}
+                onDragLeave={handleDrag}
+                onDragOver={handleDrag}
+                onDrop={handleDrop}
+                style={{
+                  position: "relative",
+                  display: "flex",
+                  flexDirection: "column",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  border: `2px dashed ${dragActive ? "#6366f1" : "#3f3f46"}`,
+                  borderRadius: "16px",
+                  padding: "36px 24px",
+                  cursor: "pointer",
+                  transition: "all 0.2s ease",
+                  background: dragActive
+                    ? "rgba(99,102,241,0.08)"
+                    : "transparent",
+                }}
+              >
+                <UploadCloud
+                  style={{
+                    width: 40,
+                    height: 40,
+                    marginBottom: 12,
+                    color: dragActive ? "#818cf8" : "#52525b",
+                    transition: "color 0.2s",
+                  }}
+                />
+                <p
+                  style={{
+                    fontWeight: 500,
+                    fontSize: "14px",
+                    color: "#d4d4d8",
+                    margin: "0 0 4px 0",
+                  }}
+                >
+                  {file ? file.name : "Drag and drop your audio file"}
+                </p>
+                <p
+                  style={{
+                    fontSize: "12px",
+                    color: "#52525b",
+                    margin: 0,
+                  }}
+                >
+                  WAV, MP3, MP4, FLAC up to 50MB
+                </p>
+
+                <input
+                  id="file-upload-input"
+                  type="file"
+                  style={{
+                    position: "absolute",
+                    inset: 0,
+                    width: "100%",
+                    height: "100%",
+                    opacity: 0,
+                    cursor: "pointer",
+                  }}
+                  accept="audio/*,video/*"
+                  onChange={(e) => {
+                    if (e.target.files?.[0]) setFile(e.target.files[0]);
+                  }}
+                />
+              </div>
+
+              {file && (
+                <button
+                  id="separate-stems-btn"
+                  onClick={() => startProcessing("file")}
+                  style={{
+                    width: "100%",
+                    marginTop: "16px",
+                    padding: "14px 16px",
+                    background:
+                      "linear-gradient(135deg, #6366f1 0%, #4f46e5 100%)",
+                    color: "#fff",
+                    border: "none",
+                    borderRadius: "14px",
+                    fontWeight: 600,
+                    fontSize: "15px",
+                    cursor: "pointer",
+                    boxShadow: "0 8px 24px rgba(99,102,241,0.3)",
+                    transition: "all 0.2s",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    gap: "8px",
+                  }}
+                >
+                  Separate Stems
+                  <ArrowRight style={{ width: 16, height: 16 }} />
+                </button>
+              )}
+
+              {/* Divider */}
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "16px",
+                  margin: "24px 0",
+                }}
+              >
+                <div
+                  style={{ flex: 1, height: "1px", background: "#27272a" }}
+                />
+                <span
+                  style={{
+                    fontSize: "11px",
+                    fontWeight: 600,
+                    color: "#52525b",
+                    textTransform: "uppercase",
+                    letterSpacing: "0.1em",
+                  }}
+                >
+                  or
+                </span>
+                <div
+                  style={{ flex: 1, height: "1px", background: "#27272a" }}
+                />
+              </div>
+
+              {/* URL Input */}
+              <div style={{ display: "flex", gap: "8px" }}>
+                <div
+                  style={{ position: "relative", flex: 1, display: "flex" }}
+                >
+                  <LinkIcon
+                    style={{
+                      position: "absolute",
+                      left: 12,
+                      top: "50%",
+                      transform: "translateY(-50%)",
+                      width: 16,
+                      height: 16,
+                      color: "#52525b",
+                    }}
+                  />
+                  <input
+                    id="youtube-url-input"
+                    type="url"
+                    placeholder="Paste YouTube URL..."
+                    value={url}
+                    onChange={(e) => setUrl(e.target.value)}
+                    style={{
+                      width: "100%",
+                      background: "#09090b",
+                      border: "1px solid #27272a",
+                      borderRadius: "12px",
+                      padding: "14px 16px 14px 40px",
+                      fontSize: "14px",
+                      color: "#e4e4e7",
+                      outline: "none",
+                      transition: "border-color 0.2s",
+                    }}
+                    onFocus={(e) =>
+                      (e.target.style.borderColor = "#6366f1")
+                    }
+                    onBlur={(e) =>
+                      (e.target.style.borderColor = "#27272a")
+                    }
+                  />
+                </div>
+                <button
+                  id="process-url-btn"
+                  onClick={() => startProcessing("url")}
+                  disabled={!url}
+                  style={{
+                    padding: "14px 24px",
+                    background: url
+                      ? "linear-gradient(135deg, #f4f4f5 0%, #d4d4d8 100%)"
+                      : "#27272a",
+                    color: url ? "#18181b" : "#52525b",
+                    border: "none",
+                    borderRadius: "12px",
+                    fontWeight: 600,
+                    fontSize: "14px",
+                    cursor: url ? "pointer" : "not-allowed",
+                    transition: "all 0.2s",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  Process
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* ========== PROCESSING STATE ========== */}
+          {status === "processing" && (
+            <div
+              style={{
+                padding: "24px 0",
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+              }}
+            >
+              {/* Spinner with glow */}
+              <div
+                style={{
+                  position: "relative",
+                  marginBottom: "24px",
+                }}
+              >
+                <div
+                  style={{
+                    position: "absolute",
+                    inset: "-8px",
+                    background: "rgba(99,102,241,0.2)",
+                    filter: "blur(20px)",
+                    borderRadius: "50%",
+                  }}
+                />
+                <Loader2
+                  style={{
+                    width: 48,
+                    height: 48,
+                    color: "#818cf8",
+                    animation: "spin 1s linear infinite",
+                    position: "relative",
+                  }}
+                />
+              </div>
+
+              <h3
+                style={{
+                  fontWeight: 700,
+                  fontSize: "20px",
+                  margin: "0 0 8px 0",
+                  color: "#fafafa",
+                }}
+              >
+                Processing Audio
+              </h3>
+              <p
+                style={{
+                  color: "#71717a",
+                  fontSize: "13px",
+                  margin: "0 0 28px 0",
+                  textAlign: "center",
+                  maxWidth: "280px",
+                }}
+              >
+                Running the AI pipeline. Do not close this tab.
+              </p>
+
+              {/* Pipeline Steps */}
+              <div
+                style={{
+                  width: "100%",
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: "4px",
+                }}
+              >
+                {visibleSteps.map((step, idx) => {
+                  const isActive = idx === currentStepIndex;
+                  const isDone = idx < currentStepIndex;
+                  const isPending = idx > currentStepIndex;
+                  const Icon = step.icon;
+
+                  return (
+                    <div
+                      key={step.key}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "12px",
+                        padding: "10px 14px",
+                        borderRadius: "12px",
+                        background: isActive
+                          ? "rgba(99,102,241,0.08)"
+                          : "transparent",
+                        border: isActive
+                          ? "1px solid rgba(99,102,241,0.2)"
+                          : "1px solid transparent",
+                        transition: "all 0.3s ease",
+                      }}
+                    >
+                      <div
+                        style={{
+                          width: 32,
+                          height: 32,
+                          borderRadius: "8px",
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          background: isDone
+                            ? "rgba(34,197,94,0.12)"
+                            : isActive
+                            ? "rgba(99,102,241,0.15)"
+                            : "rgba(39,39,42,0.5)",
+                          transition: "all 0.3s",
+                          flexShrink: 0,
+                        }}
+                      >
+                        {isDone ? (
+                          <CheckCircle2
+                            style={{
+                              width: 16,
+                              height: 16,
+                              color: "#22c55e",
+                            }}
+                          />
+                        ) : isActive ? (
+                          <Loader2
+                            style={{
+                              width: 16,
+                              height: 16,
+                              color: "#818cf8",
+                              animation: "spin 1s linear infinite",
+                            }}
+                          />
+                        ) : (
+                          <Icon
+                            style={{
+                              width: 16,
+                              height: 16,
+                              color: "#52525b",
+                            }}
+                          />
+                        )}
+                      </div>
+                      <span
+                        style={{
+                          fontSize: "13px",
+                          fontWeight: isActive ? 600 : 400,
+                          color: isDone
+                            ? "#22c55e"
+                            : isActive
+                            ? "#c7d2fe"
+                            : "#52525b",
+                          transition: "color 0.3s",
+                        }}
+                      >
+                        {step.label}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Cancel */}
+              <button
+                id="cancel-processing-btn"
+                onClick={handleCancel}
+                style={{
+                  marginTop: "24px",
+                  padding: "8px 20px",
+                  background: "transparent",
+                  border: "1px solid #27272a",
+                  borderRadius: "10px",
+                  color: "#71717a",
+                  fontSize: "13px",
+                  fontWeight: 500,
+                  cursor: "pointer",
+                  transition: "all 0.2s",
+                }}
+              >
+                Cancel
+              </button>
+            </div>
+          )}
+
+          {/* ========== SUCCESS STATE ========== */}
+          {status === "success" && downloads && (
+            <div
+              style={{
+                padding: "32px 0 16px",
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                textAlign: "center",
+              }}
+            >
+              <div
+                style={{
+                  width: 64,
+                  height: 64,
+                  borderRadius: "50%",
+                  background: "rgba(34,197,94,0.1)",
+                  border: "1px solid rgba(34,197,94,0.2)",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  marginBottom: "20px",
+                  boxShadow: "0 0 30px rgba(34,197,94,0.1)",
+                }}
+              >
+                <CheckCircle2
+                  style={{ width: 32, height: 32, color: "#22c55e" }}
+                />
+              </div>
+
+              <h3
+                style={{
+                  fontSize: "22px",
+                  fontWeight: 700,
+                  margin: "0 0 6px",
+                  color: "#fafafa",
+                }}
+              >
+                Separation Complete
+              </h3>
+              <p
+                style={{
+                  color: "#71717a",
+                  fontSize: "13px",
+                  margin: "0 0 28px",
+                }}
+              >
+                Your enhanced stems are ready to download.
+              </p>
+
+              <div
+                style={{
+                  width: "100%",
+                  display: "flex",
+                  gap: "12px",
+                }}
+              >
+                <a
+                  id="download-vocals-btn"
+                  href={downloads.vocals}
+                  download
+                  style={{
+                    flex: 1,
+                    padding: "14px 16px",
+                    background: "rgba(39,39,42,0.6)",
+                    border: "1px solid #3f3f46",
+                    borderRadius: "14px",
+                    color: "#e4e4e7",
+                    textDecoration: "none",
+                    fontWeight: 600,
+                    fontSize: "14px",
+                    textAlign: "center",
+                    transition: "all 0.2s",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    gap: "8px",
+                  }}
+                >
+                  <Download style={{ width: 16, height: 16 }} />
+                  Vocals
+                </a>
+                <a
+                  id="download-instrumental-btn"
+                  href={downloads.instrumental}
+                  download
+                  style={{
+                    flex: 1,
+                    padding: "14px 16px",
+                    background: "rgba(39,39,42,0.6)",
+                    border: "1px solid #3f3f46",
+                    borderRadius: "14px",
+                    color: "#e4e4e7",
+                    textDecoration: "none",
+                    fontWeight: 600,
+                    fontSize: "14px",
+                    textAlign: "center",
+                    transition: "all 0.2s",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    gap: "8px",
+                  }}
+                >
+                  <Download style={{ width: 16, height: 16 }} />
+                  Instrumental
+                </a>
+              </div>
+
+              <button
+                id="process-another-btn"
+                onClick={handleReset}
+                style={{
+                  marginTop: "20px",
+                  background: "transparent",
+                  border: "none",
+                  color: "#818cf8",
+                  fontSize: "13px",
+                  fontWeight: 500,
+                  cursor: "pointer",
+                  transition: "color 0.2s",
+                }}
+              >
+                Process another file
+              </button>
+            </div>
+          )}
+
+          {/* ========== ERROR STATE ========== */}
+          {status === "error" && (
+            <div
+              style={{
+                padding: "40px 0",
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                textAlign: "center",
+              }}
+            >
+              <XCircle
+                style={{
+                  width: 48,
+                  height: 48,
+                  color: "#ef4444",
+                  marginBottom: "16px",
+                }}
+              />
+              <h3
+                style={{
+                  fontWeight: 700,
+                  fontSize: "20px",
+                  color: "#fecaca",
+                  margin: "0 0 6px",
+                }}
+              >
+                Processing Failed
+              </h3>
+              <p
+                style={{
+                  color: "#71717a",
+                  fontSize: "13px",
+                  margin: "0 0 20px",
+                  maxWidth: "300px",
+                }}
+              >
+                {errorMsg || "There was an error separating the stems."}
+              </p>
+              <button
+                id="try-again-btn"
+                onClick={handleReset}
+                style={{
+                  padding: "10px 24px",
+                  background: "rgba(39,39,42,0.6)",
+                  border: "1px solid #3f3f46",
+                  borderRadius: "10px",
+                  color: "#e4e4e7",
+                  fontSize: "14px",
+                  fontWeight: 500,
+                  cursor: "pointer",
+                  transition: "all 0.2s",
+                }}
+              >
+                Try Again
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* Footer */}
+        <p
+          style={{
+            textAlign: "center",
+            marginTop: "24px",
+            fontSize: "11px",
+            color: "#3f3f46",
+            letterSpacing: "0.02em",
+          }}
+        >
+          Powered by Demucs &amp; DeepFilterNet
+        </p>
+      </div>
+
+      {/* Keyframes for spinner */}
+      <style>{`
+        @keyframes spin {
+          from { transform: rotate(0deg); }
+          to { transform: rotate(360deg); }
         }
-        @keyframes fadeDown {
-          from { opacity: 0; transform: translateY(-20px); }
-          to { opacity: 1; transform: translateY(0); }
+        button:hover {
+          filter: brightness(1.1);
         }
-        @keyframes fadeUp {
-          from { opacity: 0; transform: translateY(20px); }
-          to { opacity: 1; transform: translateY(0); }
-        }
-        @keyframes blink {
-          0%,80%,100% { opacity: .2; transform: scale(.8); }
-          40% { opacity: 1; transform: scale(1); }
-        }
-        @keyframes progress {
-          0% { width: 0%; margin-left: 0; }
-          50% { width: 70%; margin-left: 15%; }
-          100% { width: 0%; margin-left: 100%; }
+        a:hover {
+          background: rgba(63,63,70,0.8) !important;
+          border-color: #52525b !important;
         }
       `}</style>
-
-      <div className="page-bg" style={{ position: "relative", zIndex: 1, minHeight: "100vh", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "2rem 1.5rem" }}>
-        <div style={{ width: "100%", maxWidth: 640 }}>
-
-          {/* Header */}
-          <header style={{ textAlign: "center", marginBottom: "3rem", animation: "fadeDown 0.8s ease both" }}>
-            <div style={{ display: "inline-block", fontFamily: "'Space Mono', monospace", fontSize: "0.7rem", letterSpacing: "0.25em", color: "var(--accent)", border: "1px solid rgba(0,229,255,0.3)", padding: "0.3rem 0.8rem", marginBottom: "1.2rem", textTransform: "uppercase" }}>
-              AI-Powered · Demucs htdemucs
-            </div>
-            <h1 style={{ fontSize: "clamp(2.4rem, 8vw, 3.8rem)", fontWeight: 800, lineHeight: 1, letterSpacing: "-0.03em", background: "linear-gradient(135deg, #fff 30%, var(--accent3) 70%, var(--accent) 100%)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent", backgroundClip: "text" }}>
-              VocalLift
-            </h1>
-            <p style={{ marginTop: "0.8rem", color: "var(--muted)", fontSize: "0.95rem", fontFamily: "'Space Mono', monospace", letterSpacing: "0.05em" }}>
-              // isolate vocals with neural source separation
-            </p>
-            {/* Waveform */}
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 3, margin: "1.5rem 0" }}>
-              {[8,20,32,24,40,28,16,36,22,12,30,18,8].map((h, i) => (
-                <span key={i} style={{ display: "block", width: 3, height: h, borderRadius: 999, background: "var(--accent)", opacity: 0.6, animation: `wave 1.2s ease-in-out ${[0,.1,.2,.3,.15,.25,.05,.35,.1,.2,.3,.4,.15][i]}s infinite` }} />
-              ))}
-            </div>
-          </header>
-
-          {/* Card */}
-          <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 2, padding: "2rem", animation: "fadeUp 0.8s ease 0.2s both", position: "relative", overflow: "hidden" }}>
-            <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 2, background: "linear-gradient(90deg, var(--accent2), var(--accent), var(--accent3))" }} />
-
-            {/* Drop zone */}
-            <div
-              onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
-              onDragLeave={() => setDragging(false)}
-              onDrop={(e) => { e.preventDefault(); setDragging(false); const f = e.dataTransfer.files[0]; if (f) handleFileChange(f); }}
-              onClick={() => inputRef.current?.click()}
-              style={{ border: `2px dashed ${dragging ? "var(--accent)" : "var(--border)"}`, borderRadius: 2, padding: "2.5rem 1.5rem", textAlign: "center", cursor: "pointer", background: dragging ? "rgba(0,229,255,0.04)" : "var(--surface2)", transition: "all 0.2s ease", position: "relative" }}
-            >
-              <input ref={inputRef} type="file" accept=".wav,.mp3,.flac,.ogg,.m4a,.aac,.mp4,.wma" style={{ display: "none" }} onChange={(e) => { if (e.target.files?.[0]) handleFileChange(e.target.files[0]); }} />
-              <div style={{ fontSize: "2.5rem", marginBottom: "0.8rem" }}>🎵</div>
-              <div style={{ fontSize: "1rem", fontWeight: 600, color: "var(--text)", marginBottom: "0.4rem" }}>Drop your audio file here</div>
-              <div style={{ fontFamily: "'Space Mono', monospace", fontSize: "0.72rem", color: "var(--muted)", letterSpacing: "0.05em" }}>WAV · MP3 · FLAC · OGG · M4A · AAC</div>
-            </div>
-
-            {/* File preview */}
-            {file && (
-              <div style={{ display: "flex", alignItems: "center", gap: "0.8rem", marginTop: "1rem", padding: "0.8rem 1rem", background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 2 }}>
-                <span style={{ fontSize: "1.5rem", flexShrink: 0 }}>🎧</span>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontFamily: "'Space Mono', monospace", fontSize: "0.82rem", color: "var(--accent)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{file.name}</div>
-                  <div style={{ fontFamily: "'Space Mono', monospace", fontSize: "0.7rem", color: "var(--muted)", marginTop: "0.2rem" }}>{formatBytes(file.size)}</div>
-                </div>
-                <button onClick={(e) => { e.stopPropagation(); setFile(null); setStatus({ type: "idle" }); }} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--muted)", fontSize: "1rem", padding: "0.2rem" }}>✕</button>
-              </div>
-            )}
-
-            {/* Extract button */}
-            <button
-              onClick={handleExtract}
-              disabled={!file || status.type === "loading"}
-              style={{ display: "block", width: "100%", marginTop: "1.2rem", padding: "0.9rem 1.5rem", background: (!file || status.type === "loading") ? "var(--border)" : "var(--accent)", color: (!file || status.type === "loading") ? "var(--muted)" : "#000", fontFamily: "'Syne', sans-serif", fontSize: "1rem", fontWeight: 700, letterSpacing: "0.05em", border: "none", borderRadius: 2, cursor: (!file || status.type === "loading") ? "not-allowed" : "pointer", transition: "all 0.2s ease" }}
-            >
-              {status.type === "loading" ? "Extracting…" : "Extract Vocals"}
-            </button>
-
-            {/* Progress bar */}
-            {status.type === "loading" && (
-              <div style={{ height: 2, background: "var(--border)", marginTop: "0.8rem", borderRadius: 999, overflow: "hidden" }}>
-                <div style={{ height: "100%", background: "linear-gradient(90deg, var(--accent2), var(--accent))", borderRadius: 999, animation: "progress 2.5s ease-in-out infinite" }} />
-              </div>
-            )}
-
-            {/* Status messages */}
-            {status.type === "loading" && (
-              <div style={{ marginTop: "1.2rem", padding: "1rem 1.2rem", borderRadius: 2, fontFamily: "'Space Mono', monospace", fontSize: "0.82rem", lineHeight: 1.6, background: "rgba(0,229,255,0.06)", border: "1px solid rgba(0,229,255,0.2)", color: "var(--accent)" }}>
-                <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                  <span style={{ display: "inline-flex", alignItems: "center", gap: 6, marginRight: "0.6rem" }}>
-                    {[0,.2,.4].map((d,i) => <span key={i} style={{ display: "inline-block", width: 4, height: 4, borderRadius: "50%", background: "var(--accent)", animation: `blink 1.2s ${d}s infinite` }} />)}
-                  </span>
-                  Running Demucs htdemucs · this may take 1–3 minutes…
-                </div>
-                <div style={{ marginTop: "0.5rem", opacity: 0.7 }}>Neural source separation in progress. Please keep this tab open.</div>
-              </div>
-            )}
-
-            {status.type === "error" && (
-              <div style={{ marginTop: "1.2rem", padding: "1rem 1.2rem", borderRadius: 2, fontFamily: "'Space Mono', monospace", fontSize: "0.82rem", lineHeight: 1.6, background: "rgba(248,113,113,0.06)", border: "1px solid rgba(248,113,113,0.2)", color: "var(--error)", whiteSpace: "pre-wrap" }}>
-                ✗ {status.message}
-              </div>
-            )}
-
-            {status.type === "success" && (
-              <div style={{ marginTop: "1.2rem", padding: "1rem 1.2rem", borderRadius: 2, fontFamily: "'Space Mono', monospace", fontSize: "0.82rem", lineHeight: 1.6, background: "rgba(34,211,238,0.06)", border: "1px solid rgba(34,211,238,0.2)", color: "var(--success)" }}>
-                <div>✓ Extraction complete · two stems ready</div>
-                <div style={{ display: "flex", flexDirection: "column", gap: "0.6rem", marginTop: "1rem" }}>
-                  <a
-                    href={getDownloadUrl(status.data.vocals_url)}
-                    download={status.data.vocals_name}
-                    style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "0.5rem", width: "100%", padding: "0.7rem 1rem", background: "transparent", color: "var(--success)", fontFamily: "'Space Mono', monospace", fontSize: "0.78rem", fontWeight: 700, letterSpacing: "0.04em", border: "1px solid var(--success)", borderRadius: 2, textDecoration: "none", transition: "all 0.2s ease" }}
-                  >
-                    🎤 Vocals — {status.data.vocals_name}
-                  </a>
-                  {status.data.no_vocals_url && (
-                    <a
-                      href={getDownloadUrl(status.data.no_vocals_url)}
-                      download={status.data.no_vocals_name ?? ""}
-                      style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "0.5rem", width: "100%", padding: "0.7rem 1rem", background: "transparent", color: "var(--accent3)", fontFamily: "'Space Mono', monospace", fontSize: "0.78rem", fontWeight: 700, letterSpacing: "0.04em", border: "1px solid var(--accent3)", borderRadius: 2, textDecoration: "none", transition: "all 0.2s ease" }}
-                    >
-                      🎸 Instrumental — {status.data.no_vocals_name}
-                    </a>
-                  )}
-                </div>
-              </div>
-            )}
-          </div>
-
-          {/* Info strip */}
-          <div style={{ display: "flex", gap: "1rem", marginTop: "1.5rem", animation: "fadeUp 0.8s ease 0.4s both" }}>
-            {[["Model","htdemucs"],["Mode","two-stems"],["Output","WAV 44.1k"],["Backend","FastAPI"]].map(([label, value]) => (
-              <div key={label} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: "0.3rem", padding: "0.8rem 0.5rem", background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 2, textAlign: "center" }}>
-                <span style={{ fontFamily: "'Space Mono', monospace", fontSize: "0.65rem", letterSpacing: "0.12em", color: "var(--muted)", textTransform: "uppercase" }}>{label}</span>
-                <span style={{ fontSize: "0.85rem", fontWeight: 600, color: "var(--text)" }}>{value}</span>
-              </div>
-            ))}
-          </div>
-
-          {/* Health row */}
-          <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginTop: "1.2rem", fontFamily: "'Space Mono', monospace", fontSize: "0.7rem", color: "var(--muted)", animation: "fadeUp 0.8s ease 0.6s both" }}>
-            <div style={{ width: 6, height: 6, borderRadius: "50%", flexShrink: 0, background: !health.checked ? "var(--muted)" : healthOk ? "var(--success)" : "var(--error)", boxShadow: !health.checked ? "none" : healthOk ? "0 0 6px var(--success)" : "0 0 6px var(--error)" }} />
-            <span>
-              {!health.checked
-                ? "Checking Demucs…"
-                : healthOk
-                ? "Demucs ready · ffmpeg backend active"
-                : !health.ffmpeg
-                ? "⚠ ffmpeg not found — install ffmpeg and add it to PATH"
-                : "Demucs not found — run: pip install demucs"}
-            </span>
-          </div>
-
-        </div>
-      </div>
-    </>
+    </div>
   );
 }

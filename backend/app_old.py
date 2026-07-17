@@ -204,25 +204,6 @@ def ffmpeg_to_wav(input_path: str, output_path: str) -> tuple[bool, str]:
         return False, result.stderr[-800:]
     return True, ""
 
-def ffmpeg_to_mp3(input_path: str, output_path: str) -> tuple[bool, str]:
-    """Convert input audio to MP3 using ffmpeg."""
-    ffmpeg = find_ffmpeg()
-    if not ffmpeg:
-        return False, "ffmpeg not found"
-
-    cmd = [
-        ffmpeg, "-y",
-        "-i", input_path,
-        "-vn",
-        "-ar", "44100",
-        "-ac", "2",
-        "-b:a", "192k",
-        output_path
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-    if result.returncode != 0:
-        return False, result.stderr[-800:]
-    return True, ""
 
 def get_patch_script() -> str:
     """Return a small Python script used to patch `torchaudio` I/O calls.
@@ -320,25 +301,36 @@ async def extract_vocals(audio: UploadFile = File(...)):
         f.write(content)
 
     base_name = os.path.splitext(filename)[0]
-    mp3_path = os.path.join(CONVERTED_FOLDER, base_name + ".mp3")
+    wav_path = os.path.join(CONVERTED_FOLDER, base_name + ".wav")
 
-    # Convert the uploaded file to a standard MP3 format
-    ok, err = ffmpeg_to_mp3(input_path, mp3_path)
+    # Convert the uploaded file to a standard WAV format
+    ok, err = ffmpeg_to_wav(input_path, wav_path)
     if not ok:
         raise HTTPException(status_code=500, detail=f"ffmpeg conversion failed:\n{err}")
 
     # Write the small patch script that adapts torchaudio IO for Demucs
-    patch_path = os.path.join(CONVERTED_FOLDER, "_patch_and_run.py")
-    with open(patch_path, "w") as f:
-        f.write(get_patch_script())
+    # patch_path = os.path.join(CONVERTED_FOLDER, "_patch_and_run.py")
+    # with open(patch_path, "w") as f:
+    #     f.write(get_patch_script())
 
-    # Build the command that runs Demucs (via the patch script)
+    # # Build the command that runs Demucs (via the patch script)
+    # cmd = [
+    #     sys.executable, patch_path,
+    #     "--two-stems=vocals",
+    #     "-n", "htdemucs",
+    #     "--out", OUTPUT_FOLDER,
+    #     wav_path
+    # ]
     cmd = [
-        sys.executable, patch_path,
+        sys.executable,
+        "-m",
+        "demucs",
         "--two-stems=vocals",
-        "-n", "htdemucs",
-        "--out", OUTPUT_FOLDER,
-        mp3_path
+        "-n",
+        "htdemucs",
+        "--out",
+        OUTPUT_FOLDER,
+        wav_path
     ]
 
     try:

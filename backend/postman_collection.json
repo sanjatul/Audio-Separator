@@ -1,0 +1,361 @@
+{
+  "info": {
+    "name": "SonicSplit API",
+    "description": "AI-powered audio separation API. Test all endpoints for guest and registered user flows.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:8000"
+    },
+    {
+      "key": "access_token",
+      "value": ""
+    },
+    {
+      "key": "refresh_token",
+      "value": ""
+    },
+    {
+      "key": "task_id",
+      "value": ""
+    }
+  ],
+  "item": [
+    {
+      "name": "Root",
+      "item": [
+        {
+          "name": "Health Check",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/",
+            "description": "Check if the SonicSplit API is running"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Auth",
+      "item": [
+        {
+          "name": "Register",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var json = pm.response.json();",
+                  "pm.test('Status is success', function() { pm.expect(json.status).to.eql('success'); });",
+                  "pm.test('Status code is 201', function() { pm.response.to.have.status(201); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/api/auth/register",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Test User\",\n  \"email\": \"test@example.com\",\n  \"password\": \"securepass123\"\n}"
+            },
+            "description": "Register a new user account"
+          },
+          "response": []
+        },
+        {
+          "name": "Login",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var json = pm.response.json();",
+                  "pm.test('Status is success', function() { pm.expect(json.status).to.eql('success'); });",
+                  "pm.test('Has access_token', function() { pm.expect(json.data.access_token).to.be.a('string'); });",
+                  "pm.test('Has refresh_token', function() { pm.expect(json.data.refresh_token).to.be.a('string'); });",
+                  "pm.environment.set('access_token', json.data.access_token);",
+                  "pm.environment.set('refresh_token', json.data.refresh_token);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/api/auth/login",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"test@example.com\",\n  \"password\": \"securepass123\"\n}"
+            },
+            "description": "Login and receive JWT tokens. Automatically saves tokens to environment variables."
+          },
+          "response": []
+        },
+        {
+          "name": "Refresh Token",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var json = pm.response.json();",
+                  "pm.test('Status is success', function() { pm.expect(json.status).to.eql('success'); });",
+                  "pm.environment.set('access_token', json.data.access_token);",
+                  "pm.environment.set('refresh_token', json.data.refresh_token);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/api/auth/refresh",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"refresh_token\": \"{{refresh_token}}\"\n}"
+            },
+            "description": "Exchange refresh token for new token pair"
+          },
+          "response": []
+        },
+        {
+          "name": "Get Profile",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var json = pm.response.json();",
+                  "pm.test('Status is success', function() { pm.expect(json.status).to.eql('success'); });",
+                  "pm.test('Has user data', function() { pm.expect(json.data.email).to.be.a('string'); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/api/auth/profile",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{access_token}}" }
+            ],
+            "description": "Get current user profile (requires authentication)"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Processing",
+      "item": [
+        {
+          "name": "Process YouTube URL (Guest)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var json = pm.response.json();",
+                  "pm.test('Status is success', function() { pm.expect(json.status).to.eql('success'); });",
+                  "pm.test('Has task_id', function() { pm.expect(json.data.task_id).to.be.a('string'); });",
+                  "pm.environment.set('task_id', json.data.task_id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{base_url}}/api/process/youtube?url=https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+              "host": ["{{base_url}}"],
+              "path": ["api", "process", "youtube"],
+              "query": [
+                { "key": "url", "value": "https://www.youtube.com/watch?v=dQw4w9WgXcQ", "description": "YouTube URL to process" }
+              ]
+            },
+            "description": "Start audio separation from a YouTube URL (no auth required)"
+          },
+          "response": []
+        },
+        {
+          "name": "Process YouTube URL (Authenticated)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var json = pm.response.json();",
+                  "pm.test('Status is success', function() { pm.expect(json.status).to.eql('success'); });",
+                  "pm.environment.set('task_id', json.data.task_id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{base_url}}/api/process/youtube?url=https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+              "host": ["{{base_url}}"],
+              "path": ["api", "process", "youtube"],
+              "query": [
+                { "key": "url", "value": "https://www.youtube.com/watch?v=dQw4w9WgXcQ" }
+              ]
+            },
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{access_token}}" }
+            ],
+            "description": "Start audio separation from YouTube URL (authenticated, task saved to account)"
+          },
+          "response": []
+        },
+        {
+          "name": "Upload Audio File (Guest)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var json = pm.response.json();",
+                  "pm.test('Status is success', function() { pm.expect(json.status).to.eql('success'); });",
+                  "pm.environment.set('task_id', json.data.task_id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/api/process/upload",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                { "key": "file", "type": "file", "src": "/path/to/your/audio.mp3", "description": "Audio or video file to process" }
+              ]
+            },
+            "description": "Upload an audio/video file for separation (no auth required). Supported formats: wav, mp3, flac, ogg, m4a, aac, mp4, wma, webm, avi, mkv"
+          },
+          "response": []
+        },
+        {
+          "name": "Upload Audio File (Authenticated)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var json = pm.response.json();",
+                  "pm.test('Status is success', function() { pm.expect(json.status).to.eql('success'); });",
+                  "pm.environment.set('task_id', json.data.task_id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/api/process/upload",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{access_token}}" }
+            ],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                { "key": "file", "type": "file", "src": "/path/to/your/audio.mp3" }
+              ]
+            },
+            "description": "Upload an audio/video file for separation (authenticated, task saved to account)"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Tasks",
+      "item": [
+        {
+          "name": "Stream Task Status (SSE)",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/api/tasks/{{task_id}}/stream",
+            "description": "Server-Sent Events stream for real-time task status updates. Connect with an EventSource or use the webapp frontend."
+          },
+          "response": []
+        },
+        {
+          "name": "Cancel Task",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var json = pm.response.json();",
+                  "pm.test('Status is success', function() { pm.expect(json.status).to.eql('success'); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/api/tasks/{{task_id}}/cancel",
+            "description": "Cancel an in-progress or pending task"
+          },
+          "response": []
+        },
+        {
+          "name": "List My Tasks (Authenticated)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var json = pm.response.json();",
+                  "pm.test('Status is success', function() { pm.expect(json.status).to.eql('success'); });",
+                  "pm.test('Data is array', function() { pm.expect(json.data).to.be.an('array'); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/api/tasks",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{access_token}}" }
+            ],
+            "description": "List all tasks for the authenticated user. Returns empty array for guests."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Downloads",
+      "item": [
+        {
+          "name": "Download Vocals (MP3)",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/api/download/{{task_id}}/vocals",
+            "description": "Download the separated vocals as MP3. Only works after task status is 'completed'."
+          },
+          "response": []
+        },
+        {
+          "name": "Download Instrumental (MP3)",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/api/download/{{task_id}}/instrumental",
+            "description": "Download the separated instrumental as MP3. Only works after task status is 'completed'."
+          },
+          "response": []
+        }
+      ]
+    }
+  ]
+}
